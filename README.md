@@ -1,139 +1,189 @@
-**简体中文 | [English](./README_en-us.md)**
+# TrafficMonitor 任务栏卡死修复版
 
-[![Badge](https://img.shields.io/badge/link-996.icu-%23FF4D5B.svg?style=flat-square)](https://996.icu/#/en_US)
-[![LICENSE](https://img.shields.io/badge/license-Anti%20996-blue.svg?style=flat-square)](https://github.com/996icu/996.ICU/blob/master/LICENSE)
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/zhongyang219/TrafficMonitor/main.yml?branch=master&label=Release%20CI&logo=github&style=flat-square)](https://github.com/zhongyang219/TrafficMonitor/actions?query=workflow:"Release+CI")
-[![GitHub release](https://img.shields.io/github/release/zhongyang219/TrafficMonitor.svg?style=flat-square)](https://github.com/zhongyang219/TrafficMonitor/releases/latest)
+> 本仓库是 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) **1.8.6** 的个人修复分支。
+> 用于解决在笔记本上开启「显示任务栏窗口」后，切换电源模式（省电 / 低功耗）或运行安卓模拟器时，
+> **任务栏卡死、TrafficMonitor 窗口消失**的问题。
+>
+> 原始项目版权归原作者 [zhongyang219](https://github.com/zhongyang219) 所有，遵循原项目许可（Anti-996 License）。
+> 本仓库仅记录修复内容，方便自己留存与回溯。
 
-<a href="https://hellogithub.com/repository/5ef48af2b2794d4798b17d6539ec7305" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=5ef48af2b2794d4798b17d6539ec7305&claim_uid=CeVqou2T1dIvfQP" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+---
 
-# TrafficMonitor 简介
+## 一、问题现象
 
-Traffic Monitor是一款用于Windows平台的网速监控悬浮窗软件，可以显示当前网速、CPU及内存利用率，支持嵌入到任务栏显示，支持更换皮肤、历史流量统计等功能。
+在以下场景中复现：
 
-# 相关链接：
+| 条件 | 说明 |
+| --- | --- |
+| 硬件 | 双显卡笔记本（Intel 核显 + NVIDIA 独显），外接副屏 |
+| 软件 | TrafficMonitor 1.8.6 标准版，开启「显示任务栏窗口」 |
+| 触发 | 使用神舟 Control Center 3.0 切换到「省电 / 低功耗」模式 |
+| 伴随 | MuMu 模拟器运行游戏（存在虚拟显示适配器） |
 
-请[点击此处](https://github.com/zhongyang219/TrafficMonitor/releases/latest)下载TrafficMonitor的最新版本。
+**表现：**
 
-备用链接：[百度网盘下载](https://pan.baidu.com/s/15PMt7s-ASpyDwtS__4cUhg) 提取码：`ou0m`
+1. 任务栏上的 TrafficMonitor 窗口先消失或变黑
+2. 随后整个 Windows 任务栏无响应、点不动
+3. 切回高性能模式后可恢复
 
-国内用户如果遇到Github下载缓慢的问题，可以[点击此处](https://gitee.com/zhongyang219/TrafficMonitor)转到此项目在Gitee上的页面。
+---
 
-如果遇到问题，请[点击此处](./Help.md)查看常见问题。
+## 二、根因分析
 
-你也可以[点击此处](https://github.com/zhongyang219/TrafficMonitor/actions?query=workflow:"Release+CI")下载TrafficMonitor的预发行构建版本。
+这个问题实际上是**两个独立缺陷**叠加导致的。
 
-从1.80版本开始，TrafficMonitor加入了温度监控功能，如果你不需要温度监控功能，并且在使用1.80以上版本中遇到了问题，建议下载不含温度监控的版本（Lite版本）。（在Release页面找到文件名包含`Lite`的版本。）
+### 缺陷 1：与 explorer 的跨进程死锁
 
-TrafficMonitor依赖于Microsoft Visual C++ 运行环境，如果程序启动时提示“找不到MSVC*.dll”，请点击以下链接下载并安装Microsoft Visual C++ 运行环境。
+TrafficMonitor 的任务栏窗口通过 `SetParent` 嵌入到 explorer 的 `Shell_TrayWnd` 下。
+但它在调整位置时，对 explorer 的子窗口（如 `MSTaskSwWClass`）使用了**同步** `MoveWindow` / `SetWindowPos`。
 
-[最新支持的 Visual C++ 可再发行程序包下载 | Microsoft Docs](https://docs.microsoft.com/zh-CN/cpp/windows/latest-supported-vc-redist?view=msvc-170)
+同步调用本质上是 `SendMessage`，会阻塞等待 explorer 处理。而 explorer 同时又在等待本进程的任务栏子窗口，两边互等形成死锁 —— 表现就是整个任务栏卡死。
 
-# 版本说明
+> 在系统繁忙时（例如切换电源模式导致 GPU 降频），这个死锁被触发的概率大幅上升。
 
-TrafficMonitor提供了标准版和Lite版两种版本可用。标准版包含了所有的功能，Lite版本则不包含温度监控、显卡利用率、硬盘利用率等硬件监控功能。标准版运行需要管理员权限，而Lite版本则不需要。
+### 缺陷 2：D2D 设备重建失败后无法降级
 
-如果没有监控温度等硬件信息的需要，建议使用Lite版。
+任务栏窗口默认使用 Direct2D 渲染（透明背景）。当省电模式导致 GPU 降频或显卡切换时，D3D10 设备会被移除，此时程序本应自动重建。
 
-以下是两个版本功能对比。
+但源码中存在两个问题：
 
-| 功能                          | 标准版 | Lite版 |
-| ----------------------------- | ------ | ------ |
-| 网速监控                      | ✔      | ✔      |
-| CPU、内存利用率          | ✔      | ✔      |
-| CPU、显卡、硬盘、主板温度监控  | ✔      | ❌      |
-| CPU频率监控 | ✔ | ✔ |
-| 显卡利用率监控                | ✔      | ✔     |
-| 硬盘利用率监控                | ✔      | ✔     |
-| 网络详细信息                  | ✔      | ✔      |
-| 插件系统                      | ✔      | ✔      |
-| 主窗口更换皮肤                | ✔      | ✔      |
-| 需要管理员权限                | 是     | 否     |
+**① 重建失败没有兜底**
 
-注：从1.86版本开始，TrafficMonitor Lite版也提供了显卡和硬盘利用率监控功能，相比标准版仅少了温度监控功能。后续TrafficMonitor中的温度监控功能将不再维护，TrafficMonitor将不再提供标准版，仅提供Lite版。温度监控功能已经迁移到了[硬件监控插件](https://github.com/zhongyang219/TrafficMonitorPlugins/blob/main/download/plugin_download.md#%E7%A1%AC%E4%BB%B6%E7%9B%91%E6%8E%A7%E6%8F%92%E4%BB%B6)，如果需要使用温度监控功能，请下载硬件监控插件。
+只有 `DXGI_ERROR_DEVICE_REMOVED`、`D2DERR_RECREATE_TARGET` 等特定错误码才会触发重建逻辑。
+而省电降频时更常见的是 `E_OUTOFMEMORY` 一类的错误，会被当作普通错误计数，需累计 77 次才禁用 D2D。在这期间每一次重绘都会失败，窗口表现为「消失」。
 
-# 主要特性
+**② 运行期回退不生效**
 
-* 显示当前实现网络传输速率、CPU和内存占用率
-* 如果电脑有多个网卡，支持自动和手动选择网络连接
-* 查看网络详细信息
-* 支持嵌入到任务栏显示
-* 支持更换皮肤和自定义皮肤
-* 历史流量统计
-* 硬件信息监控
-* 插件系统
-# 使用说明
+即使程序自动把 `disable_d2d` 置为 `true`，也只有**在设置界面点击「应用」**时才会重建任务栏窗口。运行期自动回退不会触发重建，窗口会永远停留在无法绘制的状态。
 
-**[点击这里](https://github.com/zhongyang219/TrafficMonitor/wiki)转到Wiki页面查看关于TrafficMonitor的详细说明文档。**
+**③ 适配器选择不当**
 
-# 截图
+重建时直接取 `GetDeviceList().front()`，即枚举序第一个适配器。而多显卡笔记本上该顺序并不等于「主显示器所在显卡」，尤其存在 MuMu、Oray 等虚拟适配器时，可能选中无法用于渲染的设备。
 
-主悬浮窗：
-![](./Screenshots/main1.png)
+---
 
-右键菜单：
-![](./Screenshots/main.png)
+## 三、修复内容
 
-任务栏窗口：
+共修改 7 个文件，`+193 / -14` 行。
 
-![](./Screenshots/taskbar.PNG)
+### 1. 消除跨进程死锁
 
-多彩皮肤：
-<img src="./Screenshots/skins.PNG" style="zoom:80%;" />
+| 文件 | 修改 |
+| --- | --- |
+| `TrafficMonitor/TaskBarDlg.cpp` | 自身窗口移动改用 `SWP_ASYNCWINDOWPOS` 异步投递 |
+| `TrafficMonitor/ClassicalTaskbarDlg.cpp` | 新增 `MoveExplorerWindowAsync()`，操作 explorer 窗口时改为异步，并加入尺寸比对与 500ms 节流，避免与 StartAllBack 等工具每 100ms 反复对打 |
 
-# 如何使用
-程序启动后在会在屏幕中显示一个显示网速的悬浮窗。在悬浮窗上点击鼠标右键可以弹出右键菜单。
+关键点：`SWP_ASYNCWINDOWPOS` 让 `SetWindowPos` 不再同步等待 explorer，从根本上消除互等。
 
-TrafficMonitor支持将信息显示到任务栏。但是TrafficMonitor默认只显示主窗口（悬浮窗），如果需要让它嵌入到任务栏显示，请在右键菜单中选择“显示任务栏窗口”命令。
+### 2. D2D 渲染失败后安全降级
 
-任务栏窗口支持自定义显示项目，默认情况下只显示网速，如果需要显示CPU和内存利用率等其他信息，请在任务栏窗口右键菜单中选择“显示设置”，在弹出的“显示设置”对话框中勾选需要显示的项目，如下图所示：
+| 文件 | 修改 |
+| --- | --- |
+| `TrafficMonitor/TaskBarDlgDrawCommon.cpp` | 新增 `TryRecreateAllAfterDeviceLost()`：重建失败**一次**即永久回退 GDI 渲染，不再每帧重试 |
+| `TrafficMonitor/TaskBarDlgDrawCommon.h` | 声明上述方法 |
+| `TrafficMonitor/TaskBarDlg.cpp` | `UpdateLayeredWindowIndirect` 失败路径同步刷新渲染缓存，并加一次性标志防止重复重建 |
+| `TrafficMonitor/TrafficMonitorDlg.cpp` | 新增 `OnD2dDisabledTip`，把阻塞式弹框改为消息循环中延迟弹出 |
+| `TrafficMonitor/TrafficMonitorDlg.h` | 声明上述消息处理 |
+| `TrafficMonitor/stdafx.h` | 新增 `WM_D2D_DISABLED_TIP` 消息 |
 
-<img src="./Screenshots/taskbar_item_settings.png" style="zoom:80%;" />
+### 3. 适配器选择修正
 
-# 自定义皮肤
-<img src="./Screenshots/selecte_skin.png" style="zoom:80%;" />
+`InternalRecreateD3D10Device1()` 改为：
 
-在主窗口或通知区图标右键菜单上选择“其他功能”——“更换皮肤”可以打开更换皮肤界面。[点击此处](https://github.com/zhongyang219/TrafficMonitorSkin/blob/master/皮肤下载.md)可以下载更多皮肤。用户还可以根据自己的需要编辑自己的皮肤。
+1. 遍历适配器，跳过 `DXGI_ADAPTER_FLAG_SOFTWARE` 虚拟设备
+2. 枚举各适配器的输出，优先选择**主显示器**所在的适配器
+3. 若均未匹配，回退到第一个硬件适配器（保持原有行为）
+4. 适配器列表为空时抛出明确异常，避免对空容器调用 `.front()` 的未定义行为
 
-皮肤文件放在程序所在目录的`skins`目录下，每个皮肤被放到单独的文件夹下，文件夹的名称就是皮肤的名称。
+---
 
-其中`background.bmp`和`background_l.bmp`是背景图片，`skin.ini`是皮肤的配置文件，可以通过`skin.ini`指定文本颜色、字体、皮肤作者、每个项目的大小和位置等信息。
+## 四、验证结果
 
-从1.80版本开始增加了xml格式的皮肤配置文件`skin.xml`，只有xml格式的皮肤配置文件才支持温度和显卡使用率显示。
+修复后在本机（i7-12700 + Intel UHD 770 + RTX 3070 Ti，双屏 2560×1440 / 2560×1600）验证：
 
-从1.85版本开始增加了对png格式背景图片的支持，你可以使用png格式来制作带透明背景的皮肤，背景图片的文件名为`background.png`和`background_l.png`。
+- ✅ 进程运行稳定，无常驻内存增长
+- ✅ 任务栏窗口正常嵌入 `Shell_TrayWnd`（实测窗口矩形 `1843,1409 - 2003,1441`）
+- ✅ 切换到省电模式后，日志正确记录回退信息，任务栏不再卡死
+- ✅ 编译无新增警告
 
-详细的皮肤制作教程请点击以下链接：
+回退发生时的日志形如：
 
-[皮肤制作教程 · zhongyang219/TrafficMonitor Wiki (github.com)](https://github.com/zhongyang219/TrafficMonitor/wiki/皮肤制作教程)
+```
+Recreate D3D devices failed after device lost, fall back to GDI render.
+```
 
-# 选项设置
-<img src="./Screenshots/option.jpg" style="zoom:80%;" />
+---
 
-在右键菜单选择“选项...”可以进入选项设置。在选项设置对话框中，可以单独设置主窗口和任务栏窗口的文本颜色、字体、背景颜色、网速单位、显示的文本等。
+## 五、如何编译
 
-在“常规设置”选项卡中，可以设置是否在程序时自动检查更新，以及是否需要在开机是自动运行。可以设置在什么时候需要发出消息通知。
+### 环境要求
 
-从1.72版本开始，支持每个项目文本颜色单独设置。勾选“指定每个项目的颜色”后，点击“文本颜色”右边的颜色框，会弹出详细颜色设置的对话框，可以在这里单独指定每个项目的颜色。
+- Visual Studio 2022 或更新版本（需包含 **MSVC v143** 工具集与 **MFC** 组件）
+- Windows SDK
+- .NET Framework 4.7.2 开发人员工具包（`OpenHardwareMonitorApi` 工程需要）
 
-# 插件系统
+### 编译步骤
 
-从1.82版本开始增加了插件系统，插件dll必须放在“TrafficMonitor.exe”同级目录的“plugins”目录下。程序启动后，插件会自动加载。你可以在右键菜单“更多功能”——“插件管理”中查看并管理已加载的插件。
+```bat
+msbuild TrafficMonitor.sln /p:Configuration=Release /p:Platform=x64
+```
 
-关于如何开发TrafficMonitor的说明，请参见[插件开发指南 · zhongyang219/TrafficMonitor Wiki (github.com)](https://github.com/zhongyang219/TrafficMonitor/wiki/插件开发指南)。
+**若提示 `MSB3644: 找不到 .NETFramework,Version=v4.7.2 的引用程序集`**，说明缺少 4.7.2 目标包。两个解决办法：
 
-要下载TrafficMonitor插件，请[点击这里](https://github.com/zhongyang219/TrafficMonitorPlugins/blob/main/download/plugin_download.md)。
+**方法一（推荐）** 安装 [.NET SDK 开发人员工具包](https://dotnet.microsoft.com/download/dotnet-framework)。
 
-# 关于硬件监控功能
+**方法二** 用已有的 .NET Framework 引用程序集替代（仅编译期引用，不影响运行时行为）：
 
-从1.80版本开始，TrafficMonitor加入了硬件监控功能（包括温度监控和显卡使用率监控、CPU频率监控），它使用了第三方开源库[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)。如果你在使用温度监控功能时遇到了问题，请[点击这里](./Help.md#13-关于trafficmonitor温度监控的问题)。
+```bat
+msbuild TrafficMonitor.sln /p:Configuration=Release /p:Platform=x64 ^
+  /p:FrameworkPathOverride="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8.1"
+```
 
-需要注意的是，温度监控功能默认是关闭的，如果你要使用TrafficMonitor的温度监控功能，请到[“选项设置”-“常规设置”-“硬件监控”](https://github.com/zhongyang219/TrafficMonitor/wiki/选项设置#硬件监控)中开启。
+产物位于 `Bin\x64\Release\TrafficMonitor.exe`。
 
-**注意：硬件监控功能（包括温度监控和显卡使用率监控）可能存在一些问题，它可能会占用更多的CPU和内存。据部分用户反馈，开启温度功能后会导致程序崩溃和系统死机等问题，请在知晓以上风险后再决定开启硬件监控功能。否则，请不要使用硬件监控功能。**
+### 可用的构建配置
 
+`Release | x64`、`Release | Win32`、`Release | ARM64EC`
 
+---
 
-# 更新日志
+## 六、使用须知
 
-**[点击此处查看更新日志](./UpdateLog/update_log.md)**
+1. **升级会覆盖修复。** 若日后更新为官方版本，本修复会丢失，需重新应用补丁。
+2. **建议开启日志。** 在 `config.ini` 的 `[other]` 段设 `debug_log = true`，便于排查回退问题。
+3. **兼容性说明。** 本修复针对 Windows 11（实测 Build 26300）。Windows 10 经典任务栏路径同样适用，但未做完整回归测试。
+
+---
+
+## 七、原项目信息
+
+TrafficMonitor 是一款 Windows 平台的网速监控悬浮窗软件，可显示网速、CPU 及内存利用率，支持嵌入任务栏、更换皮肤、历史流量统计等功能。
+
+- 原项目：[zhongyang219/TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor)
+- Gitee 镜像：[zhongyang219/TrafficMonitor](https://gitee.com/zhongyang219/TrafficMonitor)
+- 常见问题：[Help.md](./Help.md)
+
+### 版本说明
+
+原项目提供标准版与 Lite 版：
+
+| 功能 | 标准版 | Lite 版 |
+| --- | --- | --- |
+| 网速监控 | ✔ | ✔ |
+| CPU、内存利用率 | ✔ | ✔ |
+| CPU、显卡、硬盘、主板温度监控 | ✔ | ❌ |
+| 显卡 / 硬盘利用率监控 | ✔ | ✔ |
+| 插件系统 | ✔ | ✔ |
+| 需要管理员权限 | 是 | 否 |
+
+> 从 1.86 版本起，温度监控功能不再维护，已迁移至[硬件监控插件](https://github.com/zhongyang219/TrafficMonitorPlugins/blob/main/download/plugin_download.md)。
+
+### 运行库依赖
+
+TrafficMonitor 依赖 Microsoft Visual C++ 运行库。若启动提示「找不到 MSVC*.dll」，请安装 [Visual C++ 可再发行程序包](https://learn.microsoft.com/zh-CN/cpp/windows/latest-supported-vc-redist)。
+
+---
+
+## 八、许可
+
+本仓库代码基于原项目修改，遵循原项目的 [Anti-996 License](./LICENSE)。

@@ -1,6 +1,48 @@
 ﻿#include "stdafx.h"
 #include "ClassicalTaskbarDlg.h"
 
+namespace
+{
+    // 任务栏里的 MSTaskSwWClass 属于 explorer。同步 MoveWindow/SetWindowPos 会
+    // SendMessage 到 explorer；explorer 同时又在等本进程的任务栏子窗口，两边互相等就会把任务栏卡死。
+    // SWP_ASYNCWINDOWPOS 改成投递，不再在这里死等。尺寸已经对上就不再发，避免和 StartAllBack 每 100ms 对打。
+    void MoveExplorerWindowAsync(HWND hwnd, int x, int y, int cx, int cy)
+    {
+        if (hwnd == nullptr || !::IsWindow(hwnd))
+            return;
+
+        RECT rc{};
+        if (::GetWindowRect(hwnd, &rc)
+            && (rc.right - rc.left) == cx
+            && (rc.bottom - rc.top) == cy)
+        {
+            return;
+        }
+
+        static HWND last_hwnd{};
+        static int last_x{};
+        static int last_y{};
+        static int last_cx{};
+        static int last_cy{};
+        static DWORD last_tick{};
+        const DWORD now = ::GetTickCount();
+        if (hwnd == last_hwnd && x == last_x && y == last_y && cx == last_cx && cy == last_cy
+            && now - last_tick < 500)
+        {
+            return;
+        }
+        last_hwnd = hwnd;
+        last_x = x;
+        last_y = y;
+        last_cx = cx;
+        last_cy = cy;
+        last_tick = now;
+
+        ::SetWindowPos(hwnd, nullptr, x, y, cx, cy,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+    }
+}
+
 void CClassicalTaskbarDlg::AdjustTaskbarWndPos(bool force_adjust)
 {
     ::GetWindowRect(m_hMin, m_rcMin); //获得最小化窗口的区域
@@ -21,13 +63,13 @@ void CClassicalTaskbarDlg::AdjustTaskbarWndPos(bool force_adjust)
             //任务窗口显示在右侧时
             if (!theApp.m_taskbar_data.tbar_wnd_on_left)
             {
-                ::MoveWindow(m_hMin, m_left_space, 0, m_rcMin.Width() - m_rect.Width(), m_rcMin.Height(), TRUE);    //设置最小化窗口的位置
+                MoveExplorerWindowAsync(m_hMin, m_left_space, 0, m_rcMin.Width() - m_rect.Width(), m_rcMin.Height());    //设置最小化窗口的位置
                 m_rect.MoveToX(m_left_space + m_rcMin.Width() - m_rect.Width() + 2);
             }
             //任务栏窗口显示在左侧时
             else
             {
-                ::MoveWindow(m_hMin, m_left_space + m_rect.Width(), 0, m_rcMin.Width() - m_rect.Width(), m_rcMin.Height(), TRUE);
+                MoveExplorerWindowAsync(m_hMin, m_left_space + m_rect.Width(), 0, m_rcMin.Width() - m_rect.Width(), m_rcMin.Height());
                 m_rect.MoveToX(m_left_space);
             }
 
@@ -50,12 +92,12 @@ void CClassicalTaskbarDlg::AdjustTaskbarWndPos(bool force_adjust)
 
             if (!theApp.m_taskbar_data.tbar_wnd_on_left)
             {
-                ::MoveWindow(m_hMin, 0, m_top_space, m_rcMin.Width(), m_rcMin.Height() - m_rect.Height(), TRUE);    //设置最小化窗口的位置
+                MoveExplorerWindowAsync(m_hMin, 0, m_top_space, m_rcMin.Width(), m_rcMin.Height() - m_rect.Height());    //设置最小化窗口的位置
                 m_rect.MoveToY(m_top_space + m_rcMin.Height() - m_rect.Height() + 2);
             }
             else
             {
-                ::MoveWindow(m_hMin, 0, m_top_space + m_rect.Height(), m_rcMin.Width(), m_rcMin.Height() - m_rect.Height(), TRUE);  //设置最小化窗口的位置
+                MoveExplorerWindowAsync(m_hMin, 0, m_top_space + m_rect.Height(), m_rcMin.Width(), m_rcMin.Height() - m_rect.Height());  //设置最小化窗口的位置
                 m_rect.MoveToY(m_top_space);
             }
             m_rect.MoveToX((m_rcMin.Width() - m_window_width) / 2);
@@ -89,10 +131,10 @@ void CClassicalTaskbarDlg::ResetTaskbarPos()
     if (!m_rcMinOri.IsRectEmpty())
     {
         if (m_taskbar_on_top_or_bottom)
-            ::MoveWindow(m_hMin, m_left_space, 0, m_rcMinOri.Width(), m_rcMinOri.Height(), TRUE);
+            MoveExplorerWindowAsync(m_hMin, m_left_space, 0, m_rcMinOri.Width(), m_rcMinOri.Height());
         else
 
-            ::MoveWindow(m_hMin, 0, m_top_space, m_rcMinOri.Width(), m_rcMinOri.Height(), TRUE);
+            MoveExplorerWindowAsync(m_hMin, 0, m_top_space, m_rcMinOri.Width(), m_rcMinOri.Height());
     }
 }
 

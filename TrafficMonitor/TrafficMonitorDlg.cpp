@@ -126,6 +126,7 @@ BEGIN_MESSAGE_MAP(CTrafficMonitorDlg, CDialog)
     ON_WM_EXITSIZEMOVE()
     ON_COMMAND(ID_PLUGIN_MANAGE, &CTrafficMonitorDlg::OnPluginManage)
     ON_MESSAGE(WM_REOPEN_TASKBAR_WND, &CTrafficMonitorDlg::OnReopenTaksbarWnd)
+    ON_MESSAGE(WM_D2D_DISABLED_TIP, &CTrafficMonitorDlg::OnD2dDisabledTip)
     ON_COMMAND(ID_OPEN_TASK_MANAGER, &CTrafficMonitorDlg::OnOpenTaskManager)
     ON_MESSAGE(WM_SETTINGS_APPLIED, &CTrafficMonitorDlg::OnSettingsApplied)
     ON_COMMAND(ID_DISPLAY_SETTINGS, &CTrafficMonitorDlg::OnDisplaySettings)
@@ -2931,6 +2932,13 @@ LRESULT CTrafficMonitorDlg::OnReopenTaksbarWnd(WPARAM wParam, LPARAM lParam)
 {
     CloseTaskBarWnd();
     OpenTaskBarWnd();
+    return 0;
+}
+
+LRESULT CTrafficMonitorDlg::OnD2dDisabledTip(WPARAM wParam, LPARAM lParam)
+{
+    // 延迟到消息循环中提示，避免在任务栏窗口的绘制流程里弹模态对话框导致卡死
+    MessageBox(CCommon::LoadText(IDS_D2DDRAWCOMMON_ERROR_TIP), NULL, MB_OK | MB_ICONWARNING);
     return 0;
 }
 

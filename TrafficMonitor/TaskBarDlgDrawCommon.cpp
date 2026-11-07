@@ -142,7 +142,17 @@ void DrawCommonHelper::DefaultD2DDrawCommonExceptionHandler::HandleErrorCountInc
         m_error_count = 0;
         // 禁用D2D绘图
         theApp.m_taskbar_data.disable_d2d = true;
-        ::MessageBox(NULL, CCommon::LoadText(IDS_D2DDRAWCOMMON_ERROR_TIP), NULL, MB_OK | MB_ICONWARNING);
+        // 运行时回退到 GDI 渲染需要重建任务栏窗口才会生效
+        if (theApp.m_pMainWnd != nullptr && theApp.m_pMainWnd->GetSafeHwnd() != nullptr)
+        {
+            ::PostMessage(theApp.m_pMainWnd->GetSafeHwnd(), WM_REOPEN_TASKBAR_WND, 0, 0);
+        }
+        // 这里运行在绘制流程中，用阻塞式 MessageBox 会卡住消息循环（任务栏可能已有卡顿），
+        // 改为在消息循环空闲后再弹出提示，避免在渲染失败时进一步拖死 UI 线程。
+        if (theApp.m_pMainWnd != nullptr && theApp.m_pMainWnd->GetSafeHwnd() != nullptr)
+        {
+            ::PostMessage(theApp.m_pMainWnd->GetSafeHwnd(), WM_D2D_DISABLED_TIP, 0, 0);
+        }
     }
 }
 
@@ -202,7 +212,8 @@ bool CTaskBarDlgDrawCommonSupport::IsAllDevicesRecreatedByThisFunction()
                           "the function on the next line:",
                           theApp.m_log_path.c_str());
         CCommon::WriteLog(__FUNCSIG__, theApp.m_log_path.c_str());
-        RecreateAll();
+        // 这里是设备已丢失后的重建，失败时改用安全路径（回退 GDI）而不是继续抛异常
+        TryRecreateAllAfterDeviceLost();
         return true;
     }
     return false;
@@ -210,8 +221,75 @@ bool CTaskBarDlgDrawCommonSupport::IsAllDevicesRecreatedByThisFunction()
 
 void CTaskBarDlgDrawCommonSupport::InternalRecreateD3D10Device1()
 {
-    auto &&default_adapter1 = CD3D10Support1::GetDeviceList(true).front();
-    m_d3d10_device1.Recreate(default_adapter1);
+    auto&& device_list = CD3D10Support1::GetDeviceList(true);
+    if (device_list.empty())
+    {
+        throw std::runtime_error{TRAFFICMONITOR_ERROR_STR("No DXGI adapter available.")};
+    }
+
+    // 原来直接取 front()，即适配器枚举顺序的第一个。
+    // 在多显卡笔记本上这个顺序并不等于“主显示器所在的显卡”：当存在 MuMu/Oray 等虚拟显示适配器，
+    // 或者省电模式下核显/独显被动态切换时，取到的可能是一个不可用于渲染的适配器，
+    // 导致 D3D10 设备创建失败、或者创建成功后很快被移除。
+    // 这里改为优先选择主显示器所在的适配器，找不到时再退回第一个（保持原有行为）。
+    std::size_t selected_index = 0;
+    {
+        // 找出主显示器对应的适配器
+        POINT pt{ 0, 0 };
+        HMONITOR h_primary_monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+        bool found{ false };
+        if (h_primary_monitor != NULL)
+        {
+            for (std::size_t i = 0; i < device_list.size() && !found; ++i)
+            {
+                DXGI_ADAPTER_DESC1 desc{};
+                if (FAILED(device_list[i]->GetDesc1(&desc)))
+                {
+                    continue;
+                }
+                // DXGI_ADAPTER_FLAG_SOFTWARE 表示软件/虚拟适配器，不作为渲染设备
+                if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0)
+                {
+                    continue;
+                }
+                // 枚举该适配器的输出，看是否包含主显示器
+                for (UINT j = 0;; ++j)
+                {
+                    Microsoft::WRL::ComPtr<IDXGIOutput> p_output{};
+                    if (device_list[i]->EnumOutputs(j, &p_output) != S_OK || p_output == nullptr)
+                    {
+                        break;
+                    }
+                    DXGI_OUTPUT_DESC output_desc{};
+                    if (SUCCEEDED(p_output->GetDesc(&output_desc)) && output_desc.Monitor == h_primary_monitor)
+                    {
+                        selected_index = i;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 若选中的适配器是虚拟/软件适配器，则退回第一个硬件适配器
+    {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(device_list[selected_index]->GetDesc1(&desc)) && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0)
+        {
+            for (std::size_t i = 0; i < device_list.size(); ++i)
+            {
+                DXGI_ADAPTER_DESC1 device_desc{};
+                if (SUCCEEDED(device_list[i]->GetDesc1(&device_desc)) && (device_desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0)
+                {
+                    selected_index = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    m_d3d10_device1.Recreate(device_list[selected_index]);
 }
 
 CTaskBarDlgDrawCommonSupport::CTaskBarDlgDrawCommonSupport()
@@ -274,6 +352,36 @@ void CTaskBarDlgDrawCommonSupport::RecreateAll()
     RecreateDCompositionDevice();
 }
 
+bool CTaskBarDlgDrawCommonSupport::TryRecreateAllAfterDeviceLost()
+{
+    // 设备丢失后的重建可能失败：例如省电模式下GPU被降频/切走、显存暂时无法分配时，
+    // D3D10CreateDevice1 会返回 E_OUTOFMEMORY 而不是 DEVICE_REMOVED。
+    // 原实现会让异常从 WM_PAINT 里一路抛出，每帧重试一次重建；重建不成功就没有任何绘制，
+    // 任务栏上的窗口既不会重绘也不会降级，表现为窗口消失/变黑、任务栏卡住。
+    // 这里改为：失败一次就直接永久回退到 GDI 渲染，保证任务栏窗口仍然可绘制。
+    try
+    {
+        RecreateAll();
+        return true;
+    }
+    catch (const std::exception& ex)
+    {
+        CCommon::WriteLog("Error: Recreate D3D devices failed after device lost, fall back to GDI render.",
+                          theApp.m_log_path.c_str());
+        CCommon::WriteLog(ex.what(), theApp.m_log_path.c_str());
+        theApp.m_taskbar_data.disable_d2d = true;
+        DrawCommonHelper::DefaultD2DDrawCommonExceptionHandler::ResetErrorCount();
+        // 运行时把 disable_d2d 置为 true 之后，必须让任务栏窗口重新创建一次才会真正切换到 GDI 渲染。
+        // 原来只有“在设置界面里改动并应用”才会触发重建，所以运行期回退后窗口会一直停留在无法绘制 D2D
+        // 的状态（表现为窗口消失/变黑）。这里异步通知主窗口重建任务栏窗口。
+        if (theApp.m_pMainWnd != nullptr && theApp.m_pMainWnd->GetSafeHwnd() != nullptr)
+        {
+            ::PostMessage(theApp.m_pMainWnd->GetSafeHwnd(), WM_REOPEN_TASKBAR_WND, 0, 0);
+        }
+        return false;
+    }
+}
+
 void CTaskBarDlgDrawCommonSupport::RecreateD3D10Device1(const HRESULT recreate_reason)
 {
     if (recreate_reason != S_OK)
@@ -284,7 +392,9 @@ void CTaskBarDlgDrawCommonSupport::RecreateD3D10Device1(const HRESULT recreate_r
                           theApp.m_log_path.c_str());
         CCommon::WriteLog(__FUNCSIG__, theApp.m_log_path.c_str());
     }
-    RecreateAll();
+    // 这是一个“设备已经丢失”后的重建入口，重建失败时不允许异常继续向上冒泡，
+    // 否则每帧都会重试重建且永远画不出东西（任务栏窗口消失/卡死）。
+    TryRecreateAllAfterDeviceLost();
 }
 
 void CTaskBarDlgDrawCommonSupport::RecreateD2D1Device(const HRESULT recreate_reason)

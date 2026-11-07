@@ -82,8 +82,21 @@ void CTaskBarDlg::ShowInfo(CDC* pDC)
                 CCommon::WriteLog(error_info, theApp.m_log_path.c_str());
                 // 禁用D2D
                 theApp.m_taskbar_data.disable_d2d = true;
-                // 展示错误信息
-                ::MessageBox(NULL, CCommon::LoadText(IDS_UPDATE_TASKBARDLG_FAILED_TIP), NULL, MB_OK | MB_ICONWARNING);
+                // 同步更新渲染类型缓存，本次绘制即可走 GDI 路径，避免继续走 D2D 导致窗口无法绘制
+                m_supported_render_enums.EnableDefaultOnly();
+                // 使用一次性标志，防止每次重绘都重复触发重建/弹框
+                static bool s_fallback_requested{ false };
+                if (!s_fallback_requested)
+                {
+                    s_fallback_requested = true;
+                    // 通知主窗口重建任务栏窗口，使 disable_d2d 的改动真正生效
+                    if (theApp.m_pMainWnd != nullptr && theApp.m_pMainWnd->GetSafeHwnd() != nullptr)
+                    {
+                        ::PostMessage(theApp.m_pMainWnd->GetSafeHwnd(), WM_REOPEN_TASKBAR_WND, 0, 0);
+                    }
+                    // 展示错误信息
+                    ::MessageBox(NULL, CCommon::LoadText(IDS_UPDATE_TASKBARDLG_FAILED_TIP), NULL, MB_OK | MB_ICONWARNING);
+                }
             }
         }
     }
@@ -423,7 +436,10 @@ void CTaskBarDlg::MoveWindow(CRect rect)
 {
     if (IsWindow(GetSafeHwnd()))
     {
-        ::MoveWindow(GetSafeHwnd(), rect.left, rect.top, rect.Width(), rect.Height(), TRUE);
+        // 本窗口已被 SetParent 到 explorer 的任务栏。同步 MoveWindow 会把消息送进 explorer，
+        // explorer 若正在等待本窗口就会死锁，表现为整个任务栏点不动。
+        ::SetWindowPos(GetSafeHwnd(), nullptr, rect.left, rect.top, rect.Width(), rect.Height(),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
     }
 }
 

@@ -163,6 +163,7 @@ public:
     auto GetPsDotLikeStyle() noexcept
         -> Microsoft::WRL::ComPtr<ID2D1StrokeStyle>;
     void RecreateAll();
+    bool TryRecreateAllAfterDeviceLost();
     void RecreateD3D10Device1(const HRESULT recreate_reason = S_OK);
     void RecreateD2D1Device(const HRESULT recreate_reason = S_OK);
     void RecreateDCompositionDevice(const HRESULT recreate_reason = S_OK);
